@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>authenticx_practice — Build Journal</title>
+<style>
+  :root { --ink:#1d2330; --muted:#5b6577; --line:#e3e7ee; --accent:#2d6cdf; --bg:#f7f9fc; --card:#fff; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+  header { background:var(--card); border-bottom:1px solid var(--line); padding:28px 22px; }
+  .wrap { max-width:860px; margin:0 auto; padding:0 22px; }
+  h1 { margin:0 0 4px; font-size:24px; }
+  header p { margin:0; color:var(--muted); }
+  main { padding:28px 0 60px; }
+  .entry { background:var(--card); border:1px solid var(--line); border-radius:10px;
+           padding:22px 24px; margin:22px 0; }
+  .entry h2 { margin:0 0 2px; font-size:19px; }
+  .meta { color:var(--muted); font-size:13px; margin-bottom:14px; }
+  .tag { display:inline-block; background:#eef3fd; color:var(--accent); border-radius:999px;
+         padding:2px 10px; font-size:12px; font-weight:600; }
+  h3 { font-size:14px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted);
+       margin:18px 0 6px; }
+  code { background:#f0f2f6; padding:1px 5px; border-radius:4px; font-size:13px; }
+  pre { background:#0f1320; color:#d7e0f5; padding:14px 16px; border-radius:8px; overflow:auto;
+        font-size:13px; line-height:1.45; }
+  ul { margin:6px 0; padding-left:20px; }
+  .talk { border-left:3px solid var(--accent); background:#f4f8ff; padding:10px 14px;
+          border-radius:0 8px 8px 0; font-style:italic; }
+  .concept { border:1px solid var(--line); border-radius:8px; padding:12px 14px; margin:8px 0; }
+  .concept b { color:var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <h1>authenticx_practice — Build Journal</h1>
+    <p>Forward Deployment Engineer interview prep · newest entries first</p>
+  </div>
+</header>
+<main class="wrap">
+
+  <!-- ============================ NEWEST ENTRY ON TOP ============================ -->
+  <article class="entry">
+    <span class="tag">Phase 0 · Design &amp; setup</span>
+    <h2>The schema is the spine: modeling four entities around the Connect contact ID</h2>
+    <div class="meta">2026-06-10</div>
+
+    <h3>What was built</h3>
+    <ul>
+      <li>Repo skeleton: <code>src/{connector,api,processing,emission,common}</code>,
+          <code>sql/</code>, <code>infra/aws/</code>, <code>tests/</code>, <code>docs/</code>.</li>
+      <li><code>sql/schema.sql</code> — the four core tables (<code>interactions</code>,
+          <code>media_records</code>, <code>transcripts</code>, <code>signals</code>) with
+          inline rationale, constraints, indexes, and an <code>updated_at</code> trigger.</li>
+      <li><code>.gitignore</code> + <code>.env.example</code> — secret-safety guardrails before
+          any code that could leak one exists.</li>
+      <li><code>README.md</code> — architecture diagram, data-model summary, reliability and
+          HIPAA/BAA posture.</li>
+    </ul>
+
+    <h3>Why this design</h3>
+    <p>Audio (S3) and metadata (contact trace records) arrive <b>separately and out of order</b>.
+       The central decision was to make the Connect <code>contact_id</code> the business key on
+       every table, so the two halves can be reconciled after the fact instead of assuming one
+       combined payload. <code>interactions</code> is an anchor row that whichever path arrives
+       first creates and the second enriches (upsert).</p>
+    <p>Alternatives considered: (a) a single wide "calls" table — rejected, it forces audio and
+       metadata to arrive together; (b) a natural-key-only PK on <code>contact_id</code> —
+       rejected in favor of surrogate <code>id</code> + <code>UNIQUE(contact_id)</code> for stable
+       internal references plus a clean dedup key.</p>
+
+    <h3>How it works</h3>
+<pre>interactions (1) ──&lt; media_records (1) ──&lt; transcripts (1) ──&lt; signals (many)
+     contact_id          idempotency_key         redacted_text       signal_type
+                         (UNIQUE → no
+                          double-ingest)</pre>
+    <p>Idempotency is enforced by the database: <code>media_records.idempotency_key</code> is
+       <code>UNIQUE</code>, so a replayed recording fails the <code>INSERT</code> rather than
+       relying on the app to remember to check. The <code>status</code> column
+       (<code>discovered → queued → ingested → transcribed → failed</code>) is the pipeline's
+       state machine and the basis for every monitoring query.</p>
+
+    <h3>New concepts learned</h3>
+    <div class="concept"><b>Contact Trace Record (CTR):</b> Amazon Connect's metadata record for
+       a contact — queue, agent, timestamps, disconnect reason — emitted separately from the audio.
+       Like a webhook event describing the call, arriving on its own channel.</div>
+    <div class="concept"><b>Database-enforced idempotency:</b> a <code>UNIQUE</code> constraint
+       turns "don't double-ingest" from a hopeful app check into a guarantee the database keeps,
+       even under retries and replayed queue messages.</div>
+    <div class="concept"><b>Redact-before-persist:</b> raw transcript text is held only in memory
+       long enough to redact; only <code>redacted_text</code> is written. <code>raw_text</code>
+       stays NULL, documenting the production design (encrypted-at-rest, access-restricted).</div>
+
+    <h3>Interview talking point</h3>
+    <p class="talk">"Recordings and metadata arrive on separate channels and out of order, so I
+       keyed the whole model on the Connect contact ID and made the interaction row an upsert
+       anchor — whichever side lands first creates it, the second enriches it. Idempotency is a
+       UNIQUE constraint on the media record, so a replayed recording is rejected by the database,
+       not by application logic I have to trust."</p>
+  </article>
+
+</main>
+</body>
+</html>
