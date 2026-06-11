@@ -43,6 +43,83 @@
 
   <!-- ============================ NEWEST ENTRY ON TOP ============================ -->
   <article class="entry">
+    <span class="tag">Phase 1 · Amazon Connect source</span>
+    <h2>Standing up the source: live scripted calls → audio + CTR metadata in S3</h2>
+    <div class="meta">2026-06-11</div>
+
+    <h3>What was built</h3>
+    <ul>
+      <li><b>Amazon Connect instance</b> <code>acx-practice</code> (<code>us-east-1</code>), with
+          Connect-stored users and both telephony directions enabled. Connect auto-created an S3
+          data bucket <code>amazon-connect-8ad40e47e8f8</code> plus a companion
+          <code>-access-logs</code> bucket (S3 server-access logging = an audit trail of who
+          touched the recordings).</li>
+      <li><b>Recording path:</b> added a <code>Set recording and analytics behavior</code> block
+          (Agent + Customer) to the <i>Sample inbound flow</i>, wired <i>before</i> the
+          transfer-to-queue, and <b>published</b>. Claimed a DID, answered as an available agent in
+          the CCP, and placed a few <b>synthetic, role-played</b> scripted calls → <code>.wav</code>
+          files landed under <code>connect/acx-practice/CallRecordings/</code>.</li>
+      <li><b>Metadata path:</b> created a <b>Kinesis Firehose</b> stream <code>acx-ctr-stream</code>
+          (Direct PUT → S3, 60s buffer) writing to the <code>connect/acx-practice/CTR/</code>
+          prefix, then turned on Connect <b>Data streaming</b> for Contact Trace Records pointing at
+          it. Fresh calls produced CTR JSON in S3.</li>
+      <li><b>Account:</b> hit AWS's new <i>free-plan</i> gate (Amazon Connect is blocked on it) and
+          made a deliberate, cost-controlled <b>upgrade to the paid plan</b> — sign-up credits +
+          the $1 billing alarm + same-session number release keep real exposure to pennies.</li>
+    </ul>
+
+    <h3>Why this design</h3>
+    <p>Two separate landing paths, on purpose: audio is written by Connect's recording behavior; the
+       CTR is streamed out independently. They share nothing but the <code>ContactId</code> — which
+       is also embedded in the <code>.wav</code> filename — so the filename literally carries the
+       join key the rest of the pipeline reconciles on. This is the README's "arrive separately,
+       match by contact ID" made real.</p>
+    <p>Firehose over a Kinesis <i>Data Stream</i> for the CTR target: a Data Stream bills a
+       per-shard-hour charge (~$11/mo if left running), while <b>Firehose has no idle cost</b>
+       (pennies per GB) — the free-tier-friendly choice. Tradeoff accepted: CTR streaming is
+       <b>forward-only</b>, so the first calls (made before streaming existed) weren't exported;
+       a second round of calls was placed to capture CTRs.</p>
+
+    <h3>How it works</h3>
+<pre>                         ┌── recording behavior ──► S3  CallRecordings/…/&lt;contactId&gt;.wav
+Connect (call ends) ─────┤
+                         └── Data streaming ──► Firehose ──(60s buffer)──► S3  CTR/…/*.json
+                                                                                   │
+                                   both keyed by ContactId  ◄───────────────────────┘</pre>
+    <p>A recording is only produced if the flow turns recording <b>on before the call reaches an
+       agent</b> (it captures the live audio leg) — turning it on after the transfer records
+       nothing. Connect never writes CTRs to S3 directly; it <code>PutRecord</code>s into Firehose,
+       which owns the S3 write. That indirection creates <b>two least-privilege IAM hops</b>:
+       Firehose→S3 (<code>s3:PutObject</code> on the bucket) and Connect→Firehose
+       (<code>firehose:PutRecord</code> on the stream).</p>
+
+    <h3>New concepts learned</h3>
+    <div class="concept"><b>Kinesis Firehose:</b> a managed buffered writer to S3 — collect records,
+       flush on a size/time hint. Like batching log lines and flushing every N seconds instead of
+       one tiny write per event.</div>
+    <div class="concept"><b>Recording-behavior placement:</b> Connect only records from the moment
+       the behavior block runs, so it must sit on the path <i>before</i> transfer-to-queue, and the
+       flow must be <b>published</b> (saving a draft does nothing for live calls).</div>
+    <div class="concept"><b>Forward-only streaming:</b> enabling CTR streaming exports contacts
+       created <i>after</i> it's on; existing contacts stay in Connect (visible in Contact search,
+       retained ~24 months) but are never back-filled to S3.</div>
+    <div class="concept"><b>Real PII surfaces here:</b> a CTR's <code>CustomerEndpoint.Address</code>
+       is the caller's actual phone number — the concrete field redaction must catch before any
+       persistence or logging.</div>
+    <div class="concept"><b>AWS free-plan vs paid-plan (2025 model):</b> new accounts start on a
+       credit-capped free plan that blocks cost-bearing services like Connect; the paid plan unlocks
+       them while still honoring free-tier allowances and sign-up credits.</div>
+
+    <h3>Interview talking point</h3>
+    <p class="talk">"The source emits audio and metadata on two independent paths — the recording is
+       written by the contact flow, the contact trace record is streamed through a Kinesis Firehose
+       to S3 — and they're reconciled downstream purely by contact ID, which is even embedded in the
+       recording's filename. I used Firehose rather than a Kinesis Data Stream specifically to avoid
+       a standing per-shard-hour charge, and I treated the CTR's customer phone number as real PII
+       to be redacted, because it is."</p>
+  </article>
+
+  <article class="entry">
     <span class="tag">Phase 0 · Design &amp; setup</span>
     <h2>The schema is the spine: modeling four entities around the Connect contact ID</h2>
     <div class="meta">2026-06-10</div>

@@ -4,6 +4,14 @@
 > MFA-protected and parked; `andy-admin` IAM user (AdministratorAccess + MFA) is the daily
 > login; $1 `EstimatedCharges` billing alarm wired to email (SNS confirmed); region `us-east-1`.
 > Per-component least-privilege IAM users are still to be created with their resources (Phase 1–2).
+>
+> **Status (2026-06-11): Phase 1 Amazon Connect source COMPLETE.** Upgraded account from the new
+> AWS *free plan* (which blocks Connect) to the **paid plan** — credits + the $1 alarm + same-session
+> number release keep exposure to pennies. Connect instance `acx-practice` (`us-east-1`); recording
+> enabled in the Sample inbound flow and published; synthetic scripted calls land `.wav` in
+> `amazon-connect-8ad40e47e8f8/connect/acx-practice/CallRecordings/`. CTR metadata streams via
+> Kinesis Firehose `acx-ctr-stream` (Direct PUT → S3, 60s buffer) into the `connect/acx-practice/CTR/`
+> prefix. **DID phone number released** after capturing calls (the only daily-billing item).
 
 Free-tier-friendly. Do the account + identity hardening now (Phase 0); per-component
 **least-privilege** IAM policies are added as their resources are created (Phases 1–2),
@@ -40,9 +48,13 @@ Each policy gets explained inline when created (IAM is an interview topic).
 
 When done, delete in reverse order of creation:
 
-1. Empty + delete the S3 recordings bucket.
-2. Delete the SQS queue and DLQ.
-3. Delete the Amazon Connect instance (stops any per-minute/usage charges).
-4. Delete per-component IAM users/policies and their access keys.
-5. Delete the CloudWatch billing alarm + SNS topic.
-6. Confirm $0 in the Billing console after the next cycle.
+1. **Release the Connect DID phone number** (Channels → Phone numbers → Release) — the only
+   daily-billing item. *(Done at the end of Phase 1; re-claim only when actively testing.)*
+2. Disable Connect **Data streaming** (CTR), then delete the **Kinesis Firehose** `acx-ctr-stream`
+   and its auto-created delivery IAM role.
+3. Empty + delete the S3 recordings bucket (and the `-access-logs` bucket).
+4. Delete the SQS queue and DLQ (Phase 2+).
+5. Delete the Amazon Connect instance (stops any per-minute/usage charges).
+6. Delete per-component IAM users/policies and their access keys.
+7. Delete the CloudWatch billing alarm + SNS topic.
+8. Confirm $0 in the Billing console after the next cycle.

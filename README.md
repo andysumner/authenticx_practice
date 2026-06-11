@@ -100,7 +100,7 @@ tests/
 ## Status
 
 - [x] **Phase 0 — Design & setup** (schema, diagram, journal; AWS account in progress)
-- [ ] Phase 1 — Amazon Connect source
+- [x] **Phase 1 — Amazon Connect source** (instance + recording flow + CTR streaming via Firehose; synthetic calls land audio in `CallRecordings/` and CTR JSON in `CTR/`)
 - [ ] Phase 2 — Ingestion connector & queue
 - [ ] Phase 3 — Mock ingestion API
 - [ ] Phase 4 — Processing pipeline
