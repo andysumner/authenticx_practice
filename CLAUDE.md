@@ -123,7 +123,7 @@ How project pieces map to what the role screens for — use this framing in jour
 Phases 0–4 are the MVP. Update the markers as work lands.
 
 - [x] **Phase 0 — Design & setup.** Repo, architecture diagram, data model, AWS account + IAM user setup. *Deliverable:* README with diagram + defensible schema; first journal entry. *(Done 2026-06-10: schema, README diagram, journal, AWS account + MFA'd root + `andy-admin` IAM user + $1 billing alarm, region `us-east-1`.)*
-- [ ] **Phase 1 — Amazon Connect source.** Create a Connect instance, enable call recording to S3, place scripted test calls. *Deliverable:* recordings + contact metadata landing in S3.
+- [x] **Phase 1 — Amazon Connect source.** Create a Connect instance, enable call recording to S3, place scripted test calls. *Deliverable:* recordings + contact metadata landing in S3. *(Done 2026-06-11: upgraded account free-plan→paid to unlock Connect; instance `acx-practice` (`us-east-1`); recording enabled in Sample inbound flow + published; synthetic scripted calls → `.wav` in `amazon-connect-8ad40e47e8f8/connect/acx-practice/CallRecordings/`; CTR metadata via Kinesis Firehose `acx-ctr-stream` → `connect/acx-practice/CTR/`; DID released after capture. Resource names in `infra/aws/setup.md` + `.env`.)*
 - [ ] **Phase 2 — Ingestion connector & queue.** S3 ObjectCreated → SQS; connector pulls audio + metadata and enqueues work items with idempotency, retries, DLQ.
 - [ ] **Phase 3 — Mock ingestion API ("AcxAPI" clone).** FastAPI upload endpoints; validate format/codec; clear response/error codes; create media record + match metadata; API-token auth.
 - [ ] **Phase 4 — Processing pipeline.** Whisper transcription → redaction → signal detection → structured write to PostgreSQL + validation queries.
