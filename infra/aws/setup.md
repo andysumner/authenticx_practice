@@ -12,6 +12,15 @@
 > `amazon-connect-8ad40e47e8f8/connect/acx-practice/CallRecordings/`. CTR metadata streams via
 > Kinesis Firehose `acx-ctr-stream` (Direct PUT → S3, 60s buffer) into the `connect/acx-practice/CTR/`
 > prefix. **DID phone number released** after capturing calls (the only daily-billing item).
+>
+> **Status (2026-06-11): Phase 2 ingestion connector & queue COMPLETE.** Provisioned by boto3 scripts
+> in `infra/aws/` (run with `andy-admin` admin creds): SQS `acx-recordings` + DLQ `acx-recordings-dlq`
+> (redrive `maxReceiveCount=5`, 60s visibility, 20s long-poll); `s3:ObjectCreated:*` notification on the
+> `connect/acx-practice/CallRecordings/` prefix → SQS, with a queue resource policy scoped to this
+> bucket/account (confused-deputy guard). Least-privilege IAM user **`acx-connector`** (own access key
+> in `.env` as `CONNECTOR_AWS_*`) scoped to consume the queue + `s3:GetObject` on recording/CTR prefixes
+> only. Connector code in `src/connector/`. Cost note: SQS + S3 events are effectively free at this
+> volume; the only standing item is whatever S3 storage the recordings occupy.
 
 Free-tier-friendly. Do the account + identity hardening now (Phase 0); per-component
 **least-privilege** IAM policies are added as their resources are created (Phases 1–2),
@@ -37,12 +46,32 @@ because you can't scope a policy to a bucket/queue that doesn't exist yet.
 Each pipeline component gets its OWN IAM user/role with a policy granting **only** the actions
 on **only** the ARNs it needs. Examples to come:
 
-| Component | Needs | Will get (least privilege) |
+| Component | Needs | Got (least privilege) |
 |---|---|---|
-| Connector (Phase 2) | read recordings, send to queue | `s3:GetObject` on the recordings bucket; `sqs:SendMessage` on the queue |
-| Consumer (Phase 2/3) | pull from queue | `sqs:ReceiveMessage`/`DeleteMessage` on the queue + DLQ |
+| `acx-connector` (Phase 2) ✅ | consume queue, read recordings | `sqs:ReceiveMessage`/`DeleteMessage`/`GetQueueAttributes`/`ChangeMessageVisibility` on `acx-recordings` only; `s3:GetObject` on the `CallRecordings/`+`CTR/` prefixes; `s3:ListBucket` limited by those prefixes |
 
-Each policy gets explained inline when created (IAM is an interview topic).
+Note: **S3 itself** (not the connector) sends to the queue — the *queue resource policy* grants
+`s3.amazonaws.com` `sqs:SendMessage`, conditioned on this bucket/account. The connector never needs
+`SendMessage`. Each policy is explained inline in its `infra/aws/provision_*.py` script (IAM is an
+interview topic).
+
+## Local dev — bring the stack up (start of a work session)
+
+AWS resources (SQS, S3 notification, IAM) persist in the cloud; only the local
+pieces need starting. From the repo root:
+
+```bash
+colima start                 # start the Docker engine VM (if not running)
+docker-compose up -d         # start Postgres (data persists in the acx_pgdata volume)
+# venv already exists; deps already installed. Sanity checks:
+./venv/bin/python -m src.connector.consumer --drain      # process any queued events, then exit
+./venv/bin/python -m src.connector.backfill              # idempotent; re-runnable catch-up
+docker exec acx_postgres psql -U acx -d acx -f /dev/stdin < sql/validation/phase2_checks.sql
+```
+
+If `venv` is missing: `python3 -m venv venv && ./venv/bin/pip install -r requirements.txt`.
+Credentials live in `.env` (git-ignored): admin `AWS_*` for provisioning, least-privilege
+`CONNECTOR_AWS_*` for the connector.
 
 ## Teardown (avoid surprise bills)
 
@@ -52,9 +81,14 @@ When done, delete in reverse order of creation:
    daily-billing item. *(Done at the end of Phase 1; re-claim only when actively testing.)*
 2. Disable Connect **Data streaming** (CTR), then delete the **Kinesis Firehose** `acx-ctr-stream`
    and its auto-created delivery IAM role.
-3. Empty + delete the S3 recordings bucket (and the `-access-logs` bucket).
-4. Delete the SQS queue and DLQ (Phase 2+).
+3. Remove the bucket's `acx-connector-recordings` **S3 event notification** (so it stops trying to
+   reach a deleted queue), then empty + delete the S3 recordings bucket (and `-access-logs`).
+4. Delete the SQS queue `acx-recordings` and DLQ `acx-recordings-dlq`.
 5. Delete the Amazon Connect instance (stops any per-minute/usage charges).
-6. Delete per-component IAM users/policies and their access keys.
+6. Delete per-component IAM users/policies and their access keys — incl. **`acx-connector`** (delete
+   its access key first), and the `andy-admin` CLI access key minted for Phase 2 provisioning.
 7. Delete the CloudWatch billing alarm + SNS topic.
 8. Confirm $0 in the Billing console after the next cycle.
+
+**Local (no AWS cost):** `docker compose down -v` removes the Postgres container + volume; `colima stop`
+(or `colima delete`) shuts down the Docker VM.

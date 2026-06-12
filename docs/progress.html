@@ -43,6 +43,155 @@
 
   <!-- ============================ NEWEST ENTRY ON TOP ============================ -->
   <article class="entry">
+    <span class="tag">Phase 2 · Capstone — backfill</span>
+    <h2>Forward-only events leave history stranded: a backfill scanner for the onboarding motion</h2>
+    <div class="meta">2026-06-12</div>
+
+    <h3>What was built</h3>
+    <ul>
+      <li>Refactored the connector so the event path and the backfill path share ONE core,
+          <code>ingest_object(bucket, key)</code> in <code>src/connector/consumer.py</code> —
+          parse contact_id → HeadObject → idempotent <code>media_record</code> insert. The live
+          path (<code>process_record</code>) now just unwraps the S3 event envelope and decodes the
+          URL-encoded key, then calls the shared core.</li>
+      <li><code>src/connector/backfill.py</code> — lists the recordings prefix with a paginator and
+          feeds every existing object through <code>ingest_object</code>. Runs as the least-privilege
+          connector user via its prefix-scoped <code>s3:ListBucket</code> grant.</li>
+    </ul>
+
+    <h3>Why this design</h3>
+    <p>S3 event notifications are <b>forward-only</b> — they fire only for objects created <i>after</i>
+       the notification exists (the same property Phase 1's CTR streaming had). The six real Phase-1
+       recordings predated the wiring, so no event ever came for them; they sat stranded in S3. That's
+       not an edge case — it's the <b>customer-onboarding motion</b>: when you forward-deploy to a new
+       contact center, their bucket is already full of history. "Event-driven for new conversations,
+       backfill for the history that predates us."</p>
+    <p>The deliberate choice was to make backfill <b>reuse the exact ingest core</b> rather than copy
+       it, so the two paths can never drift. The one thing that differs is correctly isolated: S3
+       <i>event</i> keys are URL-encoded (<code>:</code> → <code>%3A</code>) and get decoded in the
+       event wrapper, while <code>ListObjectsV2</code> returns plain keys — so the shared core always
+       receives a real, decoded key.</p>
+
+    <h3>How it works</h3>
+<pre>NEW call  ─► S3 event ─► SQS ─► process_record ─(decode key)─┐
+                                                             ├─► ingest_object ─► media_record
+HISTORY   ─► backfill.py ─► list S3 ─(plain keys)────────────┘        (ON CONFLICT = idempotent)</pre>
+    <p>Because the shared core ends in <code>ON CONFLICT (idempotency_key) DO NOTHING</code>, the
+       backfill is idempotent: objects the live path already ingested return as <code>duplicate</code>
+       no-ops. Proven live — first run: <b>ingested=11, duplicate=2</b> (the hand-fired object + the
+       synthetic test were already in); second run: <b>ingested=0, duplicate=13</b>, a total no-op.
+       So it's safe to run repeatedly, safe to run alongside live events, and the same scan on a
+       schedule becomes a reconciliation sweep.</p>
+
+    <h3>New concepts learned</h3>
+    <div class="concept"><b>Forward-only notifications:</b> S3 (and Connect CTR) events only cover
+       what's created after wiring; pre-existing data must be pulled in by listing, not waited for.</div>
+    <div class="concept"><b>Backfill vs. queue buffering:</b> connector downtime is handled by SQS
+       retention (messages wait); backfill is for data that never generated an event at all
+       (onboarding history, or a rare missed event caught by reconciliation).</div>
+    <div class="concept"><b>One core, two callers:</b> extracting <code>ingest_object</code> means the
+       live and backfill paths can't diverge — the URL-decode asymmetry is the only difference, and
+       it lives in the event wrapper where it belongs.</div>
+
+    <h3>Interview talking point</h3>
+    <p class="talk">"Event notifications are forward-only, so a new customer's existing recordings never
+       fire an event — I built a backfill scanner that lists the bucket and runs each object through the
+       exact same idempotent ingest the live path uses. First run picked up the history; a second run was
+       a complete no-op because the database UNIQUE constraint makes re-ingestion safe. That's the real
+       onboarding pattern: event-driven for new conversations, a re-runnable backfill for the history —
+       and the same scan on a schedule is my reconciliation check."</p>
+  </article>
+
+  <article class="entry">
+    <span class="tag">Phase 2 · Ingestion connector &amp; queue</span>
+    <h2>The mail carrier: S3 ObjectCreated → SQS → a least-privilege connector that records media idempotently</h2>
+    <div class="meta">2026-06-11</div>
+
+    <h3>What was built</h3>
+    <ul>
+      <li><b>Local Postgres</b> via <code>docker-compose.yml</code> (Colima as the Docker engine,
+          no Docker Desktop GUI needed). <code>sql/schema.sql</code> auto-applies on first boot, so
+          the four tables + triggers exist with one command. Teardown is <code>docker compose down -v</code>.</li>
+      <li><b>SQS main queue + DLQ</b> (<code>infra/aws/provision_sqs.py</code>): standard queue
+          <code>acx-recordings</code> with a <i>redrive policy</i> to <code>acx-recordings-dlq</code>
+          after 5 failed deliveries; 60s visibility timeout; 20s long-poll.</li>
+      <li><b>S3 → SQS event notification</b> (<code>infra/aws/provision_s3_notification.py</code>):
+          a queue resource policy letting <i>only this bucket in this account</i> send messages, then
+          an <code>s3:ObjectCreated:*</code> notification filtered to the
+          <code>CallRecordings/</code> prefix (CTR metadata deliberately excluded).</li>
+      <li><b>Least-privilege IAM user</b> <code>acx-connector</code>
+          (<code>infra/aws/provision_connector_iam.py</code>): scoped to receive/delete on the one
+          queue and <code>s3:GetObject</code> on the recording prefixes — nothing else. Verified it
+          is <i>denied</i> <code>sqs:ListQueues</code>.</li>
+      <li><b>The connector</b> (<code>src/connector/consumer.py</code> + <code>db.py</code>): long-poll
+          SQS → skip <code>s3:TestEvent</code> → parse contact_id from the filename → HeadObject →
+          upsert interaction anchor → insert <code>media_record</code> at status <code>queued</code>
+          with an idempotency key → commit → delete the message.</li>
+      <li><b>Test utility + SQL validation:</b> <code>upload_test_recording.py</code> drops a
+          synthetic silent WAV to fire a real event (the DID is released, so no live calls);
+          <code>sql/validation/phase2_checks.sql</code> proves no duplicates / orphans.</li>
+    </ul>
+
+    <h3>Why this design</h3>
+    <p>The queue is the shock absorber between "recordings land whenever" and "we process at our own
+       pace" — the same buffered-ingestion shape as the Ignition webhook handler on my resume, but
+       AWS-native. I chose a <b>standard</b> SQS queue (not FIFO): standard is <i>at-least-once</i>, so
+       it can deliver a message twice, which is exactly why idempotency is enforced one layer down by
+       a <code>UNIQUE</code> constraint rather than trusted in app code. FIFO would add cost and isn't
+       needed when the DB is the dedup authority.</p>
+    <p>Two credential tiers on purpose: <b>admin</b> creds build the infrastructure (the provisioning
+       scripts), and a separate <b>least-privilege</b> key runs the connector. If the connector key
+       leaked, the blast radius is "read some audio + drain one queue," not the whole account. I
+       provisioned with boto3 scripts rather than console clicks so the infra is reproducible,
+       documented, and teardown-able.</p>
+
+    <h3>How it works</h3>
+<pre>S3 (recording lands)
+  │  s3:ObjectCreated:*  (prefix-filtered to CallRecordings/)
+  ▼
+SQS  acx-recordings ──(5 failures)──► acx-recordings-dlq
+  │  long-poll receive (≤10 msgs)
+  ▼
+connector  ─ skip s3:TestEvent
+           ─ parse contact_id from &lt;contactId&gt;_…wav
+           ─ HeadObject (as least-privilege acx-connector)
+           ─ upsert interactions(contact_id)        ← anchor
+           ─ INSERT media_records … ON CONFLICT DO NOTHING  ← idempotency
+           ─ commit  ─► THEN delete SQS message (the ack)</pre>
+    <p>The order is the reliability story. The DB write commits <i>before</i> the SQS delete, so a
+       crash in between just means the message reappears after the visibility timeout and is retried —
+       and the <code>ON CONFLICT</code> makes that retry a harmless no-op. A message that keeps failing
+       is never silently dropped; after 5 tries SQS parks it in the DLQ. Proven live: uploading the
+       same object twice produced one <code>media_record</code> and a <code>duplicate_skip</code> log.</p>
+
+    <h3>New concepts learned</h3>
+    <div class="concept"><b>SQS visibility timeout:</b> on receive, a message is <i>hidden</i> (not
+       deleted) for N seconds. Delete it = done; crash = it reappears and retries. Like an email you
+       mark unread until you've actually finished acting on it.</div>
+    <div class="concept"><b>Redrive policy &amp; DLQ:</b> after <code>maxReceiveCount</code> failed
+       deliveries, SQS moves the message to a dead-letter queue instead of looping forever — a poison
+       message gets quarantined, not lost.</div>
+    <div class="concept"><b>Queue resource policy + confused-deputy guard:</b> S3 is a different
+       service principal, so the queue must explicitly allow <code>s3.amazonaws.com</code> to send —
+       and the <code>aws:SourceArn</code>/<code>aws:SourceAccount</code> conditions ensure only
+       <i>our</i> bucket can, not a stranger's pointed at our queue.</div>
+    <div class="concept"><b>s3:TestEvent:</b> when you attach an S3→SQS notification, S3 sends a
+       one-off test ping to prove it can deliver. The consumer must recognize and skip it.</div>
+    <div class="concept"><b>Two-tier credentials &amp; least privilege:</b> powerful admin keys
+       <i>create</i> resources; a scoped key <i>runs</i> against them. Verified by confirming the
+       connector key is denied <code>ListQueues</code>.</div>
+
+    <h3>Interview talking point</h3>
+    <p class="talk">"S3 fires an ObjectCreated event into an SQS queue, and a connector running as a
+       least-privilege IAM user pulls from it. I lean on SQS's at-least-once delivery on purpose and
+       make ingestion idempotent at the database — a UNIQUE constraint on the media record — so a
+       duplicated message is a no-op, not a double-ingest. The connector commits to Postgres before it
+       deletes the SQS message, so any crash just triggers a safe retry; messages that keep failing land
+       in a dead-letter queue rather than being dropped. It's the same buffered, retry-with-DLQ ingestion
+       pattern I built on Ignition, just AWS-native."</p>
+  </article>
+
+  <article class="entry">
     <span class="tag">Phase 1 · Amazon Connect source</span>
     <h2>Standing up the source: live scripted calls → audio + CTR metadata in S3</h2>
     <div class="meta">2026-06-11</div>

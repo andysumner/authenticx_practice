@@ -1,0 +1,11 @@
+# authenticx_practice — Python dependencies
+# Kept lean and phase-tagged so it's clear *why* each library is here.
+
+# --- Phase 2: connector + AWS provisioning ---
+boto3==1.34.144          # AWS SDK: SQS, S3, IAM (also used by infra/ provisioning scripts)
+psycopg[binary]==3.2.1   # PostgreSQL driver (psycopg3); writes media_records
+python-dotenv==1.0.1     # load .env so we never hardcode secrets/creds
+
+# --- Later phases (added as we reach them) ---
+# fastapi / uvicorn      # Phase 3: mock ingestion API
+# openai-whisper         # Phase 4: transcription

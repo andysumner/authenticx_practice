@@ -1,0 +1,35 @@
+# Local Postgres for authenticx_practice.
+#
+# Why Docker here: the connector (Phase 2) needs a real Postgres to enforce the
+# idempotency_key UNIQUE constraint — the database-level "never double-ingest"
+# guarantee. Running it in a container keeps it isolated and teardown-able
+# (`docker compose down -v` removes it cleanly), matching the project's
+# "prefer teardown-able infrastructure" rule.
+#
+# Credentials match DATABASE_URL in .env (postgresql://acx:acx@localhost:5432/acx).
+# These are LOCAL DEV creds only — never reused anywhere real.
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: acx_postgres
+    environment:
+      POSTGRES_USER: acx
+      POSTGRES_PASSWORD: acx
+      POSTGRES_DB: acx
+    ports:
+      - "5432:5432"
+    volumes:
+      # Persist data across restarts in a named volume.
+      - acx_pgdata:/var/lib/postgresql/data
+      # Auto-apply the schema on FIRST boot only (runs when the data dir is empty).
+      # Postgres runs every *.sql in this dir alphabetically at init time.
+      - ./sql/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U acx -d acx"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  acx_pgdata:
