@@ -6,6 +6,12 @@ boto3==1.34.144          # AWS SDK: SQS, S3, IAM (also used by infra/ provisioni
 psycopg[binary]==3.2.1   # PostgreSQL driver (psycopg3); writes media_records
 python-dotenv==1.0.1     # load .env so we never hardcode secrets/creds
 
+# --- Phase 3: mock ingestion API ("AcxAPI" clone) ---
+fastapi==0.111.0          # routing, request validation, auto OpenAPI docs at /docs
+uvicorn[standard]==0.30.1 # ASGI server to run FastAPI locally
+python-multipart==0.0.9   # lets FastAPI parse multipart/form-data (the file upload)
+httpx==0.27.0             # upload client + FastAPI TestClient transport
+pytest==8.2.2             # API tests
+
 # --- Later phases (added as we reach them) ---
-# fastapi / uvicorn      # Phase 3: mock ingestion API
 # openai-whisper         # Phase 4: transcription

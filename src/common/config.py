@@ -47,6 +47,9 @@ class Settings:
     sqs_dlq_url: str            # may be "" before provisioning runs
     database_url: str
 
+    # Static Bearer token the ingestion API (Phase 3) requires from callers.
+    api_token: str
+
     # Admin creds used ONLY by infra/ provisioning scripts.
     aws_access_key_id: str
     aws_secret_access_key: str
@@ -63,6 +66,7 @@ def load_settings() -> Settings:
         sqs_queue_url=os.environ.get("SQS_QUEUE_URL", ""),
         sqs_dlq_url=os.environ.get("SQS_DLQ_URL", ""),
         database_url=os.environ.get("DATABASE_URL", ""),
+        api_token=os.environ.get("ACX_API_TOKEN", ""),
         aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID", ""),
         aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY", ""),
         connector_access_key_id=os.environ.get("CONNECTOR_AWS_ACCESS_KEY_ID", ""),

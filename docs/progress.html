@@ -43,6 +43,91 @@
 
   <!-- ============================ NEWEST ENTRY ON TOP ============================ -->
   <article class="entry">
+    <span class="tag">Phase 3 · Mock ingestion API ("AcxAPI" clone)</span>
+    <h2>The front door: an authenticated upload API that validates, dedupes, and matches metadata</h2>
+    <div class="meta">2026-06-13</div>
+
+    <h3>What was built</h3>
+    <ul>
+      <li><b>A FastAPI service</b> in <code>src/api/</code> — the receiving side of the ingestion
+          contract. <code>main.py</code> wires three endpoints: <code>GET /healthz</code> (liveness +
+          a DB round-trip, no auth), <code>POST /v1/recordings</code> (the upload), and
+          <code>GET /v1/recordings/{id}</code> (look up a record).</li>
+      <li><b>Token auth</b> (<code>auth.py</code>): a FastAPI dependency that requires
+          <code>Authorization: Bearer &lt;ACX_API_TOKEN&gt;</code>, compared in <i>constant time</i>
+          with <code>hmac.compare_digest</code>, and <b>fails closed</b> if no token is configured.</li>
+      <li><b>Codec validation</b> (<code>audio.py</code>): two layered checks — the declared
+          multipart <code>Content-Type</code> (→ 415) and the actual bytes parsed as PCM WAV via the
+          stdlib <code>wave</code> module (→ 400). The byte check also yields duration for free.</li>
+      <li><b>Idempotent write + metadata matching</b> (<code>db.py</code>): an <code>upsert_interaction</code>
+          that enriches the anchor with CTR-style fields using <code>COALESCE(EXCLUDED.x, …)</code>
+          (fill blanks, never erase), then <code>insert_media_record</code> with
+          <code>ON CONFLICT (idempotency_key) DO NOTHING</code> returning <i>created</i> vs <i>duplicate</i>.</li>
+      <li><b>A push client</b> (<code>upload_client.py</code>) that POSTs a WAV (real file or a
+          synthetic silent one) with metadata, and a <b>pytest suite</b> (<code>tests/test_api.py</code>)
+          covering auth, idempotency, enrichment-without-clobber, and every error code. Plus
+          <code>sql/validation/phase3_checks.sql</code>.</li>
+    </ul>
+
+    <h3>Why this design</h3>
+    <p>Phase 2's connector wrote to Postgres directly — a deliberate stand-in until the real front
+       door existed. Phase 3 builds that door so we have <b>both sides of the ingestion contract</b>:
+       something that pushes data in, and an API that authenticates, validates, and decides
+       accept/reject with clear status codes. I chose a <b>multipart file upload</b> (audio bytes +
+       metadata) over a JSON S3-pointer because it's the realistic vendor-API shape and it actually
+       exercises codec validation and file handling — the parts the role screens for.</p>
+    <p>Idempotency here is <b>content-addressable</b>: the key is <code>sha256(bytes)</code>, so the
+       same audio is the same recording no matter who uploads it or how often. That feeds the very
+       same <code>UNIQUE</code> column the connector keys on with <code>sha256(bucket/key)</code> —
+       two paths, one dedup authority in the database. I deliberately <b>don't persist the audio
+       bytes</b> in this API: they already live in S3 from Connect, and re-storing them would add
+       cost and a second copy to secure; a comment marks where production would stream to
+       encrypted-at-rest object storage.</p>
+
+    <h3>How it works</h3>
+<pre>POST /v1/recordings  (multipart: file=&lt;wav&gt; + contact_id, queue, agent, …)
+  │  require_token  ───────────────► 401 if bad/missing Bearer token
+  │  uuid(contact_id) ─────────────► 422 if not a UUID
+  │  Content-Type in {audio/wav…} ─► 415 if wrong label
+  │  validate_wav(bytes)  ──────────► 400 if not readable PCM WAV
+  ▼
+  upsert interactions(contact_id, …)        ← enrich, COALESCE (no clobber)
+  INSERT media_records … ON CONFLICT DO NOTHING
+        ├─ row returned  ─► 201 created   (new recording)
+        └─ no row        ─► 200 duplicate (same bytes seen before, same id)</pre>
+    <p>Validation runs <i>before</i> any DB write, so a rejected upload leaves nothing behind. The
+       happy path commits once; the per-request connection rolls back on any error. The status-code
+       discipline (201 vs 200 vs 401/415/400/422/404) is the whole point — a caller can act on the
+       response without parsing a body.</p>
+
+    <h3>New concepts learned</h3>
+    <div class="concept"><b>Multipart upload + FastAPI Form/File:</b> the audio file and its metadata
+       travel together in one <code>multipart/form-data</code> body; <code>python-multipart</code>
+       lets FastAPI split them into typed parameters.</div>
+    <div class="concept"><b>Layered validation (415 vs 400):</b> the <code>Content-Type</code> is the
+       label on the envelope (cheap, client-declared); parsing the bytes is opening it. Trusting only
+       the label is how bad files slip in, so we do both and return different codes.</div>
+    <div class="concept"><b>Constant-time secret comparison:</b> <code>hmac.compare_digest</code>
+       avoids leaking how many leading characters of the token matched via response timing.</div>
+    <div class="concept"><b>Content-addressable idempotency:</b> hashing the bytes means identity
+       comes from the content itself, so retries and re-uploads collide on the UNIQUE key and become
+       safe no-ops — the DB is the dedup authority, not app logic.</div>
+    <div class="concept"><b>COALESCE upsert (enrich, don't erase):</b> on conflict we set each column
+       to <code>COALESCE(EXCLUDED.col, existing.col)</code>, so a later partial update fills blanks
+       without wiping data an earlier one provided — exactly right when metadata arrives in pieces.</div>
+
+    <h3>Interview talking point</h3>
+    <p class="talk">"The ingestion API is the receiving half of the contract: a Bearer-token-authenticated
+       multipart upload that validates the codec at the door — checking both the declared Content-Type
+       and the actual WAV bytes, with distinct 415 and 400 responses — then writes idempotently. The
+       idempotency key is a hash of the audio content, so re-uploads collide on a UNIQUE constraint and
+       return 200 instead of creating a duplicate. The same request also matches the call's metadata
+       onto the interaction with a COALESCE upsert that enriches without clobbering, because audio and
+       metadata arrive separately. It's the same auth-and-idempotency discipline I built on Ignition
+       webhook ingestion, expressed as a clean HTTP contract with deliberate status codes."</p>
+  </article>
+
+  <article class="entry">
     <span class="tag">Phase 2 · Capstone — backfill</span>
     <h2>Forward-only events leave history stranded: a backfill scanner for the onboarding motion</h2>
     <div class="meta">2026-06-12</div>
